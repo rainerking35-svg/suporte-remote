@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Suporte — compartilhar tela</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body {font-family: Arial, Helvetica, sans-serif; max-width: 800px; margin: 20px auto; padding: 8px;}
+    button {padding: 8px 12px; margin: 6px;}
+    #remote {width: 100%; border: 1px solid #ccc; min-height: 240px;}
+  </style>
+</head>
+<body>
+  <h2>Suporte remoto — Compartilhar tela</h2>
+  <div id="step1">
+    <button id="createBtn">Gerar link (você)</button>
+    <input id="tokenInput" placeholder="Cole o token ou link aqui" style="width:240px"/>
+    <button id="joinBtn">Entrar (ver tela)</button>
+  </div>
+
+  <div id="room" style="display:none">
+    <p id="info"></p>
+    <video id="remote" autoplay playsinline></video>
+    <div>
+      <button id="startShareBtn" disabled>Iniciar compartilhamento (cliente)</button>
+      <button id="stopShareBtn" disabled>Parar</button>
+      <button id="backBtn">Sair</button>
+    </div>
+    <pre id="log" style="height:120px;overflow:auto;background:#fafafa;padding:6px"></pre>
+  </div>
+
+  <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
+  <script>
+    // ===== CONFIG =====
+    const SIGNALING_URL = 'http://127.0.0.1:3000'; 
+    // ==================
+
+    const socket = io(SIGNALING_URL, { autoConnect: false });
+    let pc, localStream;
+    let token = null;
+
+    const el = id => document.getElementById(id);
+    const log = t => { el('log').textContent += t + "\n"; el('log').scrollTop = el('log').scrollHeight; };
+
+    // Cria um link temporário no servidor e preenche o campo de token automaticamente
+    el('createBtn').onclick = async () => {
+      try {
+        const res = await fetch(SIGNALING_URL + '/create-link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ minutes: 15 })
+        });
+        const data = await res.json();
+        if (!data.ok) return alert('Erro ao gerar link');
+        el('tokenInput').value = data.token; // ✅ preenche automaticamente o campo de token
+        alert('Link criado! Token: ' + data.token);
+      } catch (e) {
+        alert('Falha: ' + e.message);
+      }
+    };
+
+    // Entra na sala com o token gerado ou colado
+    el('joinBtn').onclick = () => {
+      const v = el('tokenInput').value.trim();
+      if (!v) return alert('Cole o token ou link');
+      token = v.includes('/join/') ? v.split('/join/').pop() : v;
+      token = token.trim().toUpperCase();
+      startJoin();
+    };
+
+    // Fluxo de conexão com o servidor
+    function startJoin() {
+      el('step1').style.display = 'none';
+      el('room').style.display = 'block';
+      el('info').textContent = 'Conectando...';
+      socket.connect();
+
+      socket.on('connect', () => {
+        log('Conectado ao servidor de sinalização.');
+        socket.emit('auth-token', token);
+      });
+
+      socket.on('auth-ok', d => {
+        log('Autenticado na sala: ' + d.room);
+        el('info').textContent = 'Sala: ' + d.room;
+        el('startShareBtn').disabled = false; // ✅ libera botão de compartilhamento para o dono
+      });
+
+      socket.on('auth-failed', m => {
+        alert('Token inválido ou expirado');
+        log('Auth failed');
+        socket.disconnect();
+      });
+
+      setupPeer();
+    }
+
+    // Configura o WebRTC (envio e recebimento de vídeo)
+    function setupPeer() {
+      pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+
+      pc.onicecandidate = e => {
+        if (e.candidate)
+          socket.emit('signal', { data: { type: 'ice', candidate: e.candidate } });
+      };
+
+      pc.ontrack = e => {
+        el('remote').srcObject = e.streams[0];
+        log('Recebendo stream de vídeo.');
+      };
+
+      socket.on('signal', async (data) => {
+        if (data.type === 'offer') {
+          await pc.setRemoteDescription(data);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          socket.emit('signal', { data: pc.localDescription });
+        } else if (data.type === 'answer') {
+          await pc.setRemoteDescription(data);
+        } else if (data.type === 'ice') {
+          try { await pc.addIceCandidate(data.candidate); } catch (e) { console.warn(e); }
+        }
+      });
+
+      socket.on('peer-joined', () => log('Parceiro entrou.'));
+      socket.on('peer-left', () => log('Parceiro saiu.'));
+    }
+
+    // Iniciar compartilhamento de tela
+    el('startShareBtn').onclick = async () => {
+      try {
+        localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('signal', { data: pc.localDescription });
+        el('stopShareBtn').disabled = false;
+        el('startShareBtn').disabled = true;
+        log('Compartilhamento iniciado.');
+      } catch (e) {
+        alert('Erro: ' + e.message);
+        log('Erro: ' + e.message);
+      }
+    };
+
+    // Parar compartilhamento
+    el('stopShareBtn').onclick = () => {
+      if (localStream)
+        localStream.getTracks().forEach(t => t.stop());
+      el('stopShareBtn').disabled = true;
+      el('startShareBtn').disabled = false;
+      log('Compartilhamento parado.');
+    };
+
+    // Voltar pra tela inicial
+    el('backBtn').onclick = () => {
+      location.href = '/';
+    };
+  </script>
+</body>
+</html>
